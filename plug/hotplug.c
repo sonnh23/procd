@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/sysmacros.h>
 
 #include <linux/types.h>
 #include <linux/netlink.h>
@@ -22,12 +23,15 @@
 #include <libubox/blobmsg_json.h>
 #include <libubox/json_script.h>
 #include <libubox/uloop.h>
+#include <libubox/utils.h>
 #include <json-c/json.h>
 
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <libgen.h>
+#include <grp.h>
 
 #include "../procd.h"
 
@@ -105,37 +109,50 @@ static char *hotplug_msg_find_var(struct blob_attr *msg, const char *name)
 	return NULL;
 }
 
-static void mkdir_p(char *dir)
+static void chgrp_error(const char *group, const char *target, const char *failed)
 {
-	char *l = strrchr(dir, '/');
+	ERROR("cannot set group %s for %s (%s: %d)\n",
+	       group, target, failed, errno);
+}
 
-	if (l) {
-		*l = '\0';
-		mkdir_p(dir);
-		*l = '/';
-		mkdir(dir, 0755);
-	}
+static void chgrp_target(struct blob_attr *bgroup, struct blob_attr *btarget)
+{
+	int ret = 0;
+	struct group *g = NULL;
+	const char *group = blobmsg_get_string(bgroup);
+	const char *target = blobmsg_get_string(btarget);
+
+	errno = 0;
+
+	g = getgrnam(group);
+	if (!g)
+		return chgrp_error(group, target, "getgrnam");
+
+	ret = chown(target, 0, g->gr_gid);
+	if (ret < 0)
+		return chgrp_error(group, target, "chown");
 }
 
 static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 {
 	unsigned int oldumask = umask(0);
-	static struct blobmsg_policy mkdev_policy[2] = {
+	static struct blobmsg_policy mkdev_policy[3] = {
+		{ .type = BLOBMSG_TYPE_STRING },
 		{ .type = BLOBMSG_TYPE_STRING },
 		{ .type = BLOBMSG_TYPE_STRING },
 	};
-	struct blob_attr *tb[2];
+	struct blob_attr *tb[3];
 	char *minor = hotplug_msg_find_var(msg, "MINOR");
 	char *major = hotplug_msg_find_var(msg, "MAJOR");
 	char *subsystem = hotplug_msg_find_var(msg, "SUBSYSTEM");
 
-	blobmsg_parse_array(mkdev_policy, 2, tb, blobmsg_data(data), blobmsg_data_len(data));
+	blobmsg_parse_array(mkdev_policy, 3, tb, blobmsg_data(data), blobmsg_data_len(data));
 	if (tb[0] && tb[1] && minor && major && subsystem) {
 		mode_t m = S_IFCHR;
 		char *d = strdup(blobmsg_get_string(tb[0]));
 
 		d = dirname(d);
-		mkdir_p(d);
+		mkdir_p(d, 0755);
 		free(d);
 
 		if (!strcmp(subsystem, "block"))
@@ -143,6 +160,8 @@ static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 		mknod(blobmsg_get_string(tb[0]),
 				m | strtoul(blobmsg_data(tb[1]), NULL, 8),
 				makedev(atoi(major), atoi(minor)));
+		if (tb[2])
+			chgrp_target(tb[2], tb[0]);
 	}
 	umask(oldumask);
 }
@@ -191,7 +210,7 @@ static void handle_exec(struct blob_attr *msg, struct blob_attr *data)
 		argv[i] = NULL;
 		execvp(argv[0], &argv[0]);
 	}
-	exit(-1);
+	exit(EXIT_FAILURE);
 }
 
 static void handle_button_start(struct blob_attr *msg, struct blob_attr *data)
@@ -216,14 +235,14 @@ static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 
 	if (!file || !dir || !dev) {
 		ERROR("Request for unknown firmware %s/%s\n", dir, file);
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
 
 	path = alloca(strlen(dir) + strlen(file) + 2);
 	sprintf(path, "%s/%s", dir, file);
 
 	if (stat(path, &s)) {
-		ERROR("Could not find firmware %s\n", path);
+		ERROR("Could not find firmware %s: %m\n", path);
 		src = -1;
 		s.st_size = 0;
 		goto send_to_kernel;
@@ -231,7 +250,7 @@ static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 
 	src = open(path, O_RDONLY);
 	if (src < 0) {
-		ERROR("Failed to open %s\n", path);
+		ERROR("Failed to open %s: %m\n", path);
 		s.st_size = 0;
 		goto send_to_kernel;
 	}
@@ -240,20 +259,20 @@ send_to_kernel:
 	snprintf(loadpath, sizeof(loadpath), "/sys/%s/loading", dev);
 	load = open(loadpath, O_WRONLY);
 	if (!load) {
-		ERROR("Failed to open %s\n", loadpath);
-		exit(-1);
+		ERROR("Failed to open %s: %m\n", loadpath);
+		exit(EXIT_FAILURE);
 	}
 	if (write(load, "1", 1) == -1) {
-		ERROR("Failed to write to %s\n", loadpath);
-		exit(-1);
+		ERROR("Failed to write to %s: %m\n", loadpath);
+		exit(EXIT_FAILURE);
 	}
 	close(load);
 
 	snprintf(syspath, sizeof(syspath), "/sys/%s/data", dev);
 	fw = open(syspath, O_WRONLY);
 	if (fw < 0) {
-		ERROR("Failed to open %s\n", syspath);
-		exit(-1);
+		ERROR("Failed to open %s: %m\n", syspath);
+		exit(EXIT_FAILURE);
 	}
 
 	len = s.st_size;
@@ -263,7 +282,7 @@ send_to_kernel:
 			break;
 
 		if (write(fw, buf, len) == -1) {
-			ERROR("failed to write firmware file %s/%s to %s\n", dir, file, dev);
+			ERROR("failed to write firmware file %s/%s to %s: %m\n", dir, file, dev);
 			break;
 		}
 	}
@@ -274,12 +293,26 @@ send_to_kernel:
 
 	load = open(loadpath, O_WRONLY);
 	if (write(load, "0", 1) == -1)
-		ERROR("failed to write to %s\n", loadpath);
+		ERROR("failed to write to %s: %m\n", loadpath);
 	close(load);
 
 	DEBUG(2, "Done loading %s\n", path);
 
-	exit(-1);
+	exit(EXIT_FAILURE);
+}
+
+static void handle_start_console(struct blob_attr *msg, struct blob_attr *data)
+{
+	char *dev = blobmsg_get_string(blobmsg_data(data));
+
+	DEBUG(2, "Start console request for %s\n", dev);
+
+	procd_inittab_run("respawn");
+	procd_inittab_run("askfirst");
+
+	DEBUG(2, "Done starting console for %s\n", dev);
+
+	exit(EXIT_FAILURE);
 }
 
 enum {
@@ -288,6 +321,7 @@ enum {
 	HANDLER_EXEC,
 	HANDLER_BUTTON,
 	HANDLER_FW,
+	HANDLER_START_CONSOLE,
 };
 
 static struct cmd_handler {
@@ -320,6 +354,10 @@ static struct cmd_handler {
 	[HANDLER_FW] = {
 		.name = "load-firmware",
 		.handler = handle_firmware,
+	},
+	[HANDLER_START_CONSOLE] = {
+		.name = "start-console",
+		.handler = handle_start_console,
 	},
 };
 
@@ -377,11 +415,11 @@ static void queue_add(struct cmd_handler *h, struct blob_attr *msg, struct blob_
 		&_data, blob_pad_len(data),
 		NULL);
 
-	c->msg = _msg;
-	c->data = _data;
-
 	if (!c)
 		return;
+
+	c->msg = _msg;
+	c->data = _data;
 
 	memcpy(c->msg, msg, blob_pad_len(msg));
 	memcpy(c->data, data, blob_pad_len(data));
@@ -416,11 +454,12 @@ static void handle_button_complete(struct blob_attr *msg, struct blob_attr *data
 	if (!timeout)
 		return;
 
-	b = malloc(sizeof(*b));
-	if (!b || !name)
+	if (!name)
 		return;
 
-	memset(b, 0, sizeof(*b));
+	b = calloc(1, sizeof(*b));
+	if (!b)
+		return;
 
 	b->data = malloc(blob_pad_len(data));
 	b->name = strdup(name);
@@ -474,15 +513,13 @@ static void rule_handle_command(struct json_script_ctx *ctx, const char *name,
 	int rem, i;
 
 	if (debug > 3) {
-		DEBUG(4, "Command: %s", name);
+		DEBUG(4, "Command: %s\n", name);
 		blobmsg_for_each_attr(cur, data, rem)
-			DEBUG(4, " %s", (char *) blobmsg_data(cur));
-		DEBUG(4, "\n");
+			DEBUG(4, " %s\n", (char *) blobmsg_data(cur));
 
-		DEBUG(4, "Message:");
+		DEBUG(4, "Message:\n");
 		blobmsg_for_each_attr(cur, vars, rem)
-			DEBUG(4, " %s=%s", blobmsg_name(cur), (char *) blobmsg_data(cur));
-		DEBUG(4, "\n");
+			DEBUG(4, " %s=%s\n", blobmsg_name(cur), (char *) blobmsg_data(cur));
 	}
 
 	for (i = 0; i < ARRAY_SIZE(handlers); i++)
@@ -531,10 +568,12 @@ static void hotplug_handler(struct uloop_fd *u, unsigned int ev)
 {
 	int i = 0;
 	static char buf[4096];
-	int len = recv(u->fd, buf, sizeof(buf), MSG_DONTWAIT);
+	int len = recv(u->fd, buf, sizeof(buf) - 1, MSG_DONTWAIT);
 	void *index;
 	if (len < 1)
 		return;
+
+	buf[len] = '\0';
 
 	blob_buf_init(&b, 0);
 	index = blobmsg_open_table(&b, NULL);
@@ -568,26 +607,25 @@ void hotplug_last_event(uloop_timeout_handler handler)
 
 void hotplug(char *rules)
 {
-	struct sockaddr_nl nls;
+	struct sockaddr_nl nls = {};
 	int nlbufsize = 512 * 1024;
 
 	rule_file = strdup(rules);
-	memset(&nls,0,sizeof(struct sockaddr_nl));
 	nls.nl_family = AF_NETLINK;
-	nls.nl_pid = getpid();
+	nls.nl_pid = 0;
 	nls.nl_groups = -1;
 
 	if ((hotplug_fd.fd = socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_KOBJECT_UEVENT)) == -1) {
-		ERROR("Failed to open hotplug socket: %s\n", strerror(errno));
+		ERROR("Failed to open hotplug socket: %m\n");
 		exit(1);
 	}
 	if (bind(hotplug_fd.fd, (void *)&nls, sizeof(struct sockaddr_nl))) {
-		ERROR("Failed to bind hotplug socket: %s\n", strerror(errno));
+		ERROR("Failed to bind hotplug socket: %m\n");
 		exit(1);
 	}
 
 	if (setsockopt(hotplug_fd.fd, SOL_SOCKET, SO_RCVBUFFORCE, &nlbufsize, sizeof(nlbufsize)))
-		ERROR("Failed to resize receive buffer: %s\n", strerror(errno));
+		ERROR("Failed to resize receive buffer: %m\n");
 
 	json_script_init(&jctx);
 	queue_proc.cb = queue_proc_cb;

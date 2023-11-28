@@ -41,7 +41,10 @@
 #define SECCOMP_RET_TRAP	0x00030000U /* disallow and force a SIGSYS */
 #define SECCOMP_RET_ERRNO	0x00050000U /* returns an errno */
 #define SECCOMP_RET_LOG		0x00070000U
+#define SECCOMP_RET_LOGALLOW	0x7ffc0000U
+#define SECCOMP_RET_TRACE	0x7ff00000U /* pass to a tracer or disallow */
 #define SECCOMP_RET_ALLOW	0x7fff0000U /* allow */
+#define SECCOMP_RET_KILLPROCESS	0x80000000U
 #define SECCOMP_RET_ERROR(x)	(SECCOMP_RET_ERRNO | ((x) & 0x0000ffffU))
 #define SECCOMP_RET_LOGGER(x)	(SECCOMP_RET_LOG | ((x) & 0x0000ffffU))
 
@@ -59,6 +62,7 @@ struct seccomp_data {
 
 #define syscall_nr (offsetof(struct seccomp_data, nr))
 #define arch_nr (offsetof(struct seccomp_data, arch))
+#define syscall_arg(x) (offsetof(struct seccomp_data, args[x]))
 
 #if defined(__i386__)
 # define REG_SYSCALL	REG_EAX
@@ -80,6 +84,9 @@ struct seccomp_data {
 # else
 #  define ARCH_NR	AUDIT_ARCH_ARMEB
 # endif
+#elif defined(__PPC__)
+# define REG_SYSCALL	regs.gpr[0]
+# define ARCH_NR	AUDIT_ARCH_PPC
 #else
 # warning "Platform does not support seccomp filter yet"
 # define REG_SYSCALL	0

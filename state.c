@@ -13,6 +13,7 @@
  */
 
 #include <fcntl.h>
+#include <pwd.h>
 #include <sys/reboot.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,7 @@
 #include <sys/types.h>
 #include <signal.h>
 
+#include "container.h"
 #include "procd.h"
 #include "syslog.h"
 #include "plug/hotplug.h"
@@ -48,7 +50,7 @@ static void set_stdio(const char* tty)
 	    !freopen(tty, "w", stdout) ||
 	    !freopen(tty, "w", stderr) ||
 	    chdir("/"))
-		ERROR("failed to set stdio\n");
+		ERROR("failed to set stdio: %m\n");
 	else
 		fcntl(STDERR_FILENO, F_SETFL, fcntl(STDERR_FILENO, F_GETFL) | O_NONBLOCK);
 }
@@ -73,7 +75,7 @@ static void set_console(void)
 	}
 
 	if (chdir("/dev")) {
-		ERROR("failed to change dir to /dev\n");
+		ERROR("failed to change dir to /dev: %m\n");
 		return;
 	}
 	while (tty!=NULL) {
@@ -87,15 +89,44 @@ static void set_console(void)
 		i++;
 	}
 	if (chdir("/"))
-		ERROR("failed to change dir to /\n");
+		ERROR("failed to change dir to /: %m\n");
 
 	if (tty != NULL)
 		set_stdio(tty);
 }
 
+static void perform_halt()
+{
+	if (reboot_event == RB_POWER_OFF)
+		LOG("- power down -\n");
+	else
+		LOG("- reboot -\n");
+
+	/* Allow time for last message to reach serial console, etc */
+	sleep(1);
+
+	if (is_container()) {
+		reboot(reboot_event);
+		exit(EXIT_SUCCESS);
+		return;
+	}
+
+	/* We have to fork here, since the kernel calls do_exit(EXIT_SUCCESS)
+	 * in linux/kernel/sys.c, which can cause the machine to panic when
+	 * the init process exits... */
+	if (!vfork()) { /* child */
+		reboot(reboot_event);
+		_exit(EXIT_SUCCESS);
+	}
+
+	while (1)
+		sleep(1);
+}
+
 static void state_enter(void)
 {
 	char ubus_cmd[] = "/sbin/ubusd";
+	struct passwd *p;
 
 	switch (state) {
 	case STATE_EARLY:
@@ -109,10 +140,20 @@ static void state_enter(void)
 		// try to reopen incase the wdt was not available before coldplug
 		watchdog_init(0);
 		set_stdio("console");
-		LOG("- ubus -\n");
+		p = getpwnam("ubus");
+		if (p) {
+			int ret;
+			LOG("- ubus -\n");
+			mkdir(p->pw_dir, 0755);
+			ret = chown(p->pw_dir, p->pw_uid, p->pw_gid);
+			if (ret)
+				LOG("- ubus - failed to chown(%s)\n", p->pw_dir);
+		} else {
+			LOG("- ubus (running as root!) -\n");
+		}
+
 		procd_connect_ubus();
-		service_init();
-		service_start_early("ubus", ubus_cmd);
+		service_start_early("ubus", ubus_cmd, p?"ubus":NULL, p?"ubus":NULL);
 		break;
 
 	case STATE_INIT:
@@ -129,6 +170,8 @@ static void state_enter(void)
 
 	case STATE_RUNNING:
 		LOG("- init complete -\n");
+		procd_inittab_run("respawnlate");
+		procd_inittab_run("askconsolelate");
 		break;
 
 	case STATE_SHUTDOWN:
@@ -150,24 +193,11 @@ static void state_enter(void)
 		kill(-1, SIGKILL);
 		sync();
 		sleep(1);
-		if (reboot_event == RB_POWER_OFF)
-			LOG("- power down -\n");
-		else
-			LOG("- reboot -\n");
-
-		/* Allow time for last message to reach serial console, etc */
-		sleep(1);
-
-		/* We have to fork here, since the kernel calls do_exit(EXIT_SUCCESS)
-		 * in linux/kernel/sys.c, which can cause the machine to panic when
-		 * the init process exits... */
-		if (!vfork( )) { /* child */
-			reboot(reboot_event);
-			_exit(EXIT_SUCCESS);
-		}
-
-		while (1)
-			sleep(1);
+#ifndef DISABLE_INIT
+		perform_halt();
+#else
+		exit(EXIT_SUCCESS);
+#endif
 		break;
 
 	default:

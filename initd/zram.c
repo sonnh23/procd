@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 
 #include "../log.h"
+#include "../container.h"
 
 #include "init.h"
 
@@ -30,7 +31,7 @@ proc_meminfo(void)
 
 	fp = fopen("/proc/meminfo", "r");
 	if (fp == NULL) {
-		ERROR("Can't open /proc/meminfo: %s\n", strerror(errno));
+		ERROR("Can't open /proc/meminfo: %m\n");
 		return errno;
 	}
 
@@ -53,23 +54,23 @@ static int
 early_insmod(char *module)
 {
 	pid_t pid = fork();
+	char *modprobe[] = { "/sbin/modprobe", NULL, NULL };
 
 	if (!pid) {
-		char *modprobe[] = { "/usr/sbin/modprobe", NULL, NULL };
 		char *path;
 		struct utsname ver;
 
 		uname(&ver);
-		path = alloca(sizeof(module) + strlen(ver.release) + 1);
+		path = alloca(strlen(module) + strlen(ver.release) + 1);
 		sprintf(path, module, ver.release);
 		modprobe[1] = path;
 		execvp(modprobe[0], modprobe);
-		ERROR("Can't exec /usr/sbin/modprobe\n");
-		exit(-1);
+		ERROR("Can't exec %s: %m\n", modprobe[0]);
+		exit(EXIT_FAILURE);
 	}
 
 	if (pid <= 0) {
-		ERROR("Can't exec /usr/sbin/modprobe\n");
+		ERROR("Can't exec %s: %m\n", modprobe[0]);
 		return -1;
 	} else {
 		waitpid(pid, NULL, 0);
@@ -98,7 +99,7 @@ mount_zram_on_tmp(void)
 	zramsize = proc_meminfo() / 2;
 	fp = fopen("/sys/block/zram0/disksize", "r+");
 	if (fp == NULL) {
-		ERROR("Can't open /sys/block/zram0/disksize: %s\n", strerror(errno));
+		ERROR("Can't open /sys/block/zram0/disksize: %m\n");
 		return errno;
 	}
 	fprintf(fp, "%ld", KB(zramsize));
@@ -107,22 +108,30 @@ mount_zram_on_tmp(void)
 	pid = fork();
 	if (!pid) {
 		execvp(mkfs[0], mkfs);
-		ERROR("Can't exec /sbin/mkfs.ext4\n");
-		exit(-1);
+		ERROR("Can't exec %s: %m\n", mkfs[0]);
+		exit(EXIT_FAILURE);
 	} else if (pid <= 0) {
-		ERROR("Can't exec /sbin/mkfs.ext4\n");
+		ERROR("Can't exec %s: %m\n", mkfs[0]);
 		return -1;
 	} else {
 		waitpid(pid, NULL, 0);
 	}
 
-	ret = mount("/dev/zram0", "/tmp", "ext4", MS_NOSUID | MS_NODEV | MS_NOATIME, "errors=continue,noquota");
-	if (ret < 0) {
-		ERROR("Can't mount /dev/zram0 on /tmp: %s\n", strerror(errno));
-		return errno;
+	if (!is_container()) {
+		ret = mount("/dev/zram0", "/tmp", "ext4", MS_NOSUID | MS_NODEV | MS_NOATIME, "errors=continue,noquota");
+		if (ret < 0) {
+			ERROR("Can't mount /dev/zram0 on /tmp: %m\n");
+			return errno;
+		}
 	}
 
 	LOG("Using up to %ld kB of RAM as ZRAM storage on /mnt\n", zramsize);
+
+	ret = chmod("/tmp", 01777);
+	if (ret < 0) {
+		ERROR("Can't set /tmp mode to 1777: %m\n");
+		return errno;
+	}
 
 	return 0;
 }

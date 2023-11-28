@@ -10,12 +10,11 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
+#ifndef _JAIL_ELF_H_
+#define _JAIL_ELF_H_
 
-#ifndef _ELF_H__
 #include <libubox/avl.h>
 #include <libubox/avl-cmp.h>
-
-#include "log.h"
 
 struct library {
 	struct avl_node avl;
@@ -30,9 +29,11 @@ struct library_path {
 
 extern struct avl_tree libraries;
 
-extern void alloc_library_path(const char *path);
-extern char* find_lib(char *file);
-extern int elf_load_deps(char *library);
-extern void load_ldso_conf(const char *conf);
+void alloc_library(const char *path, const char *name);
+int elf_load_deps(const char *path, const char *map);
+const char* find_lib(const char *file);
+void init_library_search(void);
+int lib_open(char **fullpath, const char *file);
+void free_library_search(void);
 
 #endif

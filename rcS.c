@@ -18,12 +18,14 @@
 
 #include <libubox/uloop.h>
 #include <libubox/runqueue.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <glob.h>
 
 #include <libubox/ustream.h>
@@ -36,12 +38,14 @@ static struct runqueue q, r;
 struct initd {
 	struct ustream_fd fd;
 	struct runqueue_process proc;
+	struct timespec ts_start;
 	char *file;
 	char *param;
 };
 
 static void pipe_cb(struct ustream *s, int bytes)
 {
+	struct initd *initd = container_of(s, struct initd, fd.stream);
 	char *newline, *str;
 	int len;
 
@@ -54,9 +58,9 @@ static void pipe_cb(struct ustream *s, int bytes)
 			break;
 		*newline = 0;
 		len = newline + 1 - str;
-		syslog(0, "%s", str);
+		ULOG_NOTE("%s: %s", initd->file, str);
 #ifdef SHOW_BOOT_ON_CONSOLE
-		fprintf(stderr, "%s\n", str);
+		fprintf(stderr, "%s: %s\n", initd->file, str);
 #endif
 		ustream_consume(s, len);
 	} while (1);
@@ -68,9 +72,10 @@ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
 	int pipefd[2];
 	pid_t pid;
 
+	clock_gettime(CLOCK_MONOTONIC_RAW, &s->ts_start);
 	DEBUG(2, "start %s %s \n", s->file, s->param);
 	if (pipe(pipefd) == -1) {
-		ERROR("Failed to create pipe\n");
+		ERROR("Failed to create pipe: %m\n");
 		return;
 	}
 
@@ -80,6 +85,7 @@ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
 
 	if (pid) {
 		close(pipefd[1]);
+		fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
 		s->fd.stream.string_data = true,
 		s->fd.stream.notify_read = pipe_cb,
 		runqueue_process_add(q, &s->proc, pid);
@@ -87,8 +93,14 @@ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
 		return;
 	}
 	close(pipefd[0]);
+
+	int devnull = open("/dev/null", O_RDONLY);
+	dup2(devnull, STDIN_FILENO);
 	dup2(pipefd[1], STDOUT_FILENO);
 	dup2(pipefd[1], STDERR_FILENO);
+
+	if (devnull > STDERR_FILENO)
+		close(devnull);
 
 	execlp(s->file, s->file, s->param, NULL);
 	exit(1);
@@ -97,8 +109,17 @@ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
 static void q_initd_complete(struct runqueue *q, struct runqueue_task *p)
 {
 	struct initd *s = container_of(p, struct initd, proc.task);
+	struct timespec ts_stop, ts_res;
 
-	DEBUG(2, "stop %s %s \n", s->file, s->param);
+	clock_gettime(CLOCK_MONOTONIC_RAW, &ts_stop);
+	ts_res.tv_sec = ts_stop.tv_sec - s->ts_start.tv_sec;
+	ts_res.tv_nsec = ts_stop.tv_nsec - s->ts_start.tv_nsec;
+	if (ts_res.tv_nsec < 0) {
+		--ts_res.tv_sec;
+		ts_res.tv_nsec += 1000000000;
+	}
+
+	DEBUG(2, "stop %s %s - took %" PRId64 ".%09" PRId64 "s\n", s->file, s->param, (int64_t)ts_res.tv_sec, (int64_t)ts_res.tv_nsec);
 	ustream_free(&s->fd.stream);
 	close(s->fd.fd.fd);
 	free(s);
@@ -121,8 +142,10 @@ static void add_initd(struct runqueue *q, char *file, char *param)
 	}
 	s->proc.task.type = &initd_type;
 	s->proc.task.complete = q_initd_complete;
-	if (!strcmp(param, "stop") || !strcmp(param, "shutdown"))
+	if (!strcmp(param, "stop") || !strcmp(param, "shutdown")) {
 		s->proc.task.run_timeout = 15000;
+		s->proc.task.cancel_timeout = 10000;
+	}
 	s->param = p;
 	s->file = f;
 	strcpy(s->param, param);

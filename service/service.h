@@ -18,8 +18,10 @@
 #include <libubox/avl.h>
 #include <libubox/vlist.h>
 #include <libubox/list.h>
+#include "../utils/utils.h"
 
 extern struct avl_tree services;
+extern struct avl_tree containers;
 
 struct vrule {
 	struct avl_node avl;
@@ -40,19 +42,24 @@ struct validate {
 struct service {
 	struct avl_node avl;
 	const char *name;
+	bool deleted;
+	bool autostart;
 
 	struct blob_attr *trigger;
 	struct vlist_tree instances;
 	struct list_head validators;
+	struct blob_attr *data;
+	struct blobmsg_list data_blob;
 };
 
 void service_validate_add(struct service *s, struct blob_attr *attr);
 void service_validate_dump(struct blob_buf *b, struct service *s);
 void service_validate_dump_all(struct blob_buf *b, char *p, char *s);
-int service_start_early(char *name, char *cmdline);
+int service_start_early(char *name, char *cmdline, char *user, char *group);
+void service_stopped(struct service *s);
 void service_validate_del(struct service *s);
-void service_validate_init(void);
-void service_init(void);
 void service_event(const char *type, const char *service, const char *instance);
+
+
 
 #endif

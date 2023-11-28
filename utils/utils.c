@@ -12,15 +12,23 @@
  * GNU General Public License for more details.
  */
 
+#define _GNU_SOURCE
 #include <libubox/avl.h>
 #include <libubox/avl-cmp.h>
 #include "utils.h"
-#include <asm-generic/setup.h>
 #include <regex.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <string.h>
+#include <errno.h>
+
+#include "../log.h"
+
+#ifndef O_PATH
+#define O_PATH		010000000
+#endif
 
 void
 __blobmsg_list_init(struct blobmsg_list *list, int offset, int len, blobmsg_list_cmp cmp)
@@ -127,6 +135,28 @@ blobmsg_list_equal(struct blobmsg_list *l1, struct blobmsg_list *l2)
 	return true;
 }
 
+char *get_active_console(char *out, int len)
+{
+	char line[CMDLINE_SIZE + 1];
+	int fd = open("/sys/class/tty/console/active", O_RDONLY);
+	ssize_t r = read(fd, line, sizeof(line) - 1);
+
+	close(fd);
+
+	if (r <= 0)
+		return NULL;
+
+	/* The active file is terminated by a newline which we need to strip */
+	char *newline = strtok(line, "\n");
+
+	if (newline != NULL) {
+		strncpy(out, newline, len);
+		return out;
+	}
+
+	return NULL;
+}
+
 char* get_cmdline_val(const char* name, char* out, int len)
 {
 	char line[CMDLINE_SIZE + 1], *c, *sptr;
@@ -142,8 +172,11 @@ char* get_cmdline_val(const char* name, char* out, int len)
 	for (c = strtok_r(line, " \t\n", &sptr); c;
 			c = strtok_r(NULL, " \t\n", &sptr)) {
 		char *sep = strchr(c, '=');
+		if (sep == NULL)
+			continue;
+
 		ssize_t klen = sep - c;
-		if (klen < 0 || strncmp(name, c, klen) || name[klen] != 0)
+		if (strncmp(name, c, klen) || name[klen] != 0)
 			continue;
 
 		strncpy(out, &sep[1], len);
@@ -152,4 +185,54 @@ char* get_cmdline_val(const char* name, char* out, int len)
 	}
 
 	return NULL;
+}
+
+int patch_fd(const char *device, int fd, int flags)
+{
+	int dfd, nfd;
+
+	if (device == NULL)
+		device = "/dev/null";
+
+	if (*device != '/') {
+		dfd = open("/dev", O_PATH|O_DIRECTORY);
+
+		if (dfd < 0)
+			return -1;
+
+		nfd = openat(dfd, device, flags);
+
+		close(dfd);
+	} else {
+		nfd = open(device, flags);
+	}
+
+	if (nfd < 0 && strcmp(device, "/dev/null"))
+		nfd = open("/dev/null", flags);
+
+	if (nfd < 0)
+		return -1;
+
+	fd = dup2(nfd, fd);
+
+	if (nfd > STDERR_FILENO)
+		close(nfd);
+
+	return (fd < 0) ? -1 : 0;
+}
+
+int patch_stdio(const char *device)
+{
+	int fd, rv = 0;
+	const char *fdname[3] = { "stdin", "stdout", "stderr" };
+
+	for (fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++) {
+		if (patch_fd(device, fd, fd ? O_WRONLY : O_RDONLY)) {
+			ERROR("Failed to redirect %s to %s: %m\n",
+			      fdname[fd], device);
+			rv = -1;
+		}
+	}
+
+	return rv;
 }

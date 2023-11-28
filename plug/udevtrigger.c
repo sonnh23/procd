@@ -66,7 +66,7 @@ static void log_message(int priority, const char *format, ...)
         log_message(LOG_INFO ,"%s: " format ,__FUNCTION__ ,## arg); \
     } while (0)
 
-#ifdef DEBUG
+#ifdef UDEV_DEBUG
 #undef dbg
 #define dbg(format, arg...)                         \
     do {                                    \
@@ -94,12 +94,12 @@ static void trigger_uevent(const char *devpath)
 
 	fd = open(filename, O_WRONLY);
 	if (fd < 0) {
-		dbg("error on opening %s: %s\n", filename, strerror(errno));
+		dbg("error on opening %s: %m\n", filename);
 		return;
 	}
 
 	if (write(fd, "add", 3) < 0)
-		info("error on triggering %s: %s\n", filename, strerror(errno));
+		info("error on triggering %s: %m\n", filename);
 
 	close(fd);
 }
@@ -114,7 +114,7 @@ static int sysfs_resolve_link(char *devpath, size_t size)
 
 	strlcpy(link_path, "/sys", sizeof(link_path));
 	strlcat(link_path, devpath, sizeof(link_path));
-	len = readlink(link_path, link_target, sizeof(link_target));
+	len = readlink(link_path, link_target, sizeof(link_target) - 1);
 	if (len <= 0)
 		return -1;
 	link_target[len] = '\0';

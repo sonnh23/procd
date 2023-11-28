@@ -11,21 +11,24 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
+#define _GNU_SOURCE
 
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/mount.h>
+#include <fcntl.h>
 
 #include <libubox/uloop.h>
 #include <libubox/utils.h>
 #include <libubus.h>
 
 #include <stdio.h>
-
+#include <stdlib.h>
 #include <unistd.h>
 
 #include "init.h"
 #include "../watchdog.h"
+#include "../sysupgrade.h"
 
 static struct uloop_process preinit_proc;
 static struct uloop_process plugd_proc;
@@ -39,7 +42,7 @@ check_dbglvl(void)
 	if (!fp)
 		return;
 	if (fscanf(fp, "%d", &lvl) == EOF)
-		ERROR("failed to read debug level\n");
+		ERROR("failed to read debug level: %m\n");
 	fclose(fp);
 	unlink("/tmp/debug_level");
 
@@ -48,22 +51,57 @@ check_dbglvl(void)
 }
 
 static void
+check_sysupgrade(void)
+{
+	char *prefix = NULL, *path = NULL, *command = NULL;
+	size_t n;
+
+	if (chdir("/"))
+		return;
+
+	FILE *sysupgrade = fopen("/tmp/sysupgrade", "r");
+	if (!sysupgrade)
+		return;
+
+	n = 0;
+	if (getdelim(&prefix, &n, 0, sysupgrade) < 0)
+		goto fail;
+	n = 0;
+	if (getdelim(&path, &n, 0, sysupgrade) < 0)
+		goto fail;
+	n = 0;
+	if (getdelim(&command, &n, 0, sysupgrade) < 0)
+		goto fail;
+
+	fclose(sysupgrade);
+
+	sysupgrade_exec_upgraded(prefix, path, NULL, command, NULL);
+
+	while (true)
+		sleep(1);
+
+fail:
+	fclose(sysupgrade);
+	free(prefix);
+	free(path);
+	free(command);
+}
+
+static void
 spawn_procd(struct uloop_process *proc, int ret)
 {
 	char *wdt_fd = watchdog_fd();
 	char *argv[] = { "/sbin/procd", NULL};
-	struct stat s;
 	char dbg[2];
 
 	if (plugd_proc.pid > 0)
 		kill(plugd_proc.pid, SIGKILL);
 
-	if (!stat("/tmp/sysupgrade", &s))
-		while (true)
-			sleep(1);
-
-	unsetenv("INITRAMFS");
 	unsetenv("PREINIT");
+	unlink("/tmp/.preinit");
+
+	check_sysupgrade();
+
 	DEBUG(2, "Exec to real procd now\n");
 	if (wdt_fd)
 		setenv("WDTFD", wdt_fd, 1);
@@ -87,6 +125,7 @@ preinit(void)
 {
 	char *init[] = { "/bin/sh", "/etc/preinit", NULL };
 	char *plug[] = { "/sbin/procd", "-h", "/etc/hotplug-preinit.json", NULL };
+	int fd;
 
 	LOG("- preinit -\n");
 
@@ -94,26 +133,33 @@ preinit(void)
 	plugd_proc.pid = fork();
 	if (!plugd_proc.pid) {
 		execvp(plug[0], plug);
-		ERROR("Failed to start plugd\n");
-		exit(-1);
+		ERROR("Failed to start plugd: %m\n");
+		exit(EXIT_FAILURE);
 	}
 	if (plugd_proc.pid <= 0) {
-		ERROR("Failed to start new plugd instance\n");
+		ERROR("Failed to start new plugd instance: %m\n");
 		return;
 	}
 	uloop_process_add(&plugd_proc);
 
 	setenv("PREINIT", "1", 1);
 
+	fd = creat("/tmp/.preinit", 0600);
+
+	if (fd < 0)
+		ERROR("Failed to create sentinel file: %m\n");
+	else
+		close(fd);
+
 	preinit_proc.cb = spawn_procd;
 	preinit_proc.pid = fork();
 	if (!preinit_proc.pid) {
 		execvp(init[0], init);
-		ERROR("Failed to start preinit\n");
-		exit(-1);
+		ERROR("Failed to start preinit: %m\n");
+		exit(EXIT_FAILURE);
 	}
 	if (preinit_proc.pid <= 0) {
-		ERROR("Failed to start new preinit instance\n");
+		ERROR("Failed to start new preinit instance: %m\n");
 		return;
 	}
 	uloop_process_add(&preinit_proc);

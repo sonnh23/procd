@@ -30,13 +30,15 @@
 
 static struct uloop_timeout wdt_timeout;
 static int wdt_fd = -1;
+static int wdt_drv_timeout = 30;
 static int wdt_frequency = 5;
+static bool wdt_magicclose = false;
 
 void watchdog_ping(void)
 {
 	DEBUG(4, "Ping\n");
 	if (wdt_fd >= 0 && write(wdt_fd, "X", 1) < 0)
-		ERROR("WDT failed to write: %s\n", strerror(errno));
+		ERROR("WDT failed to write: %m\n");
 }
 
 static void watchdog_timeout_cb(struct uloop_timeout *t)
@@ -45,12 +47,75 @@ static void watchdog_timeout_cb(struct uloop_timeout *t)
 	uloop_timeout_set(t, wdt_frequency * 1000);
 }
 
+static int watchdog_open(bool cloexec)
+{
+	char *env = getenv("WDTFD");
+
+	if (wdt_fd >= 0)
+		return wdt_fd;
+
+	if (env) {
+		DEBUG(2, "Watchdog handover: fd=%s\n", env);
+		wdt_fd = atoi(env);
+		unsetenv("WDTFD");
+	} else {
+		wdt_fd = open(WDT_PATH, O_WRONLY);
+	}
+
+	if (wdt_fd < 0)
+		return wdt_fd;
+
+	if (cloexec)
+		fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) | FD_CLOEXEC);
+
+	return wdt_fd;
+}
+
+static void watchdog_close(void)
+{
+	if (wdt_fd < 0)
+		return;
+
+	if (write(wdt_fd, "V", 1) < 0)
+		ERROR("WDT failed to write release: %m\n");
+
+	if (close(wdt_fd) == -1)
+		ERROR("WDT failed to close watchdog: %m\n");
+
+	wdt_fd = -1;
+}
+
+static int watchdog_set_drv_timeout(void)
+{
+	if (wdt_fd < 0)
+		return -1;
+
+	return ioctl(wdt_fd, WDIOC_SETTIMEOUT, &wdt_drv_timeout);
+}
+
+void watchdog_set_magicclose(bool val)
+{
+	wdt_magicclose = val;
+}
+
+bool watchdog_get_magicclose(void)
+{
+	return wdt_magicclose;
+}
+
 void watchdog_set_stopped(bool val)
 {
-	if (val)
+	if (val) {
 		uloop_timeout_cancel(&wdt_timeout);
-	else
+
+		if (wdt_magicclose)
+			watchdog_close();
+	}
+	else {
+		watchdog_open(true);
+		watchdog_set_drv_timeout();
 		watchdog_timeout_cb(&wdt_timeout);
+	}
 }
 
 bool watchdog_get_stopped(void)
@@ -60,23 +125,19 @@ bool watchdog_get_stopped(void)
 
 int watchdog_timeout(int timeout)
 {
-	if (wdt_fd < 0)
-		return 0;
-
 	if (timeout) {
 		DEBUG(4, "Set watchdog timeout: %ds\n", timeout);
-		ioctl(wdt_fd, WDIOC_SETTIMEOUT, &timeout);
-	}
-	ioctl(wdt_fd, WDIOC_GETTIMEOUT, &timeout);
+		wdt_drv_timeout = timeout;
 
-	return timeout;
+		if (wdt_fd >= 0)
+			watchdog_set_drv_timeout();
+	}
+
+	return wdt_drv_timeout;
 }
 
 int watchdog_frequency(int frequency)
 {
-	if (wdt_fd < 0)
-		return 0;
-
 	if (frequency) {
 		DEBUG(4, "Set watchdog frequency: %ds\n", frequency);
 		wdt_frequency = frequency;
@@ -87,10 +148,11 @@ int watchdog_frequency(int frequency)
 
 char* watchdog_fd(void)
 {
-	static char fd_buf[3];
+	static char fd_buf[12];
 
 	if (wdt_fd < 0)
 		return NULL;
+
 	snprintf(fd_buf, sizeof(fd_buf), "%d", wdt_fd);
 
 	return fd_buf;
@@ -98,38 +160,28 @@ char* watchdog_fd(void)
 
 void watchdog_init(int preinit)
 {
-	char *env = getenv("WDTFD");
-
-	if (wdt_fd >= 0)
-		return;
-
 	wdt_timeout.cb = watchdog_timeout_cb;
-	if (env) {
-		DEBUG(2, "Watchdog handover: fd=%s\n", env);
-		wdt_fd = atoi(env);
-		unsetenv("WDTFD");
-	} else {
-		wdt_fd = open("/dev/watchdog", O_WRONLY);
-	}
 
-	if (wdt_fd < 0)
+	if (watchdog_open(!preinit) < 0)
 		return;
-
-	if (!preinit)
-		fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) | FD_CLOEXEC);
 
 	LOG("- watchdog -\n");
-	watchdog_timeout(30);
+	watchdog_set_drv_timeout();
 	watchdog_timeout_cb(&wdt_timeout);
 
 	DEBUG(4, "Opened watchdog with timeout %ds\n", watchdog_timeout(0));
 }
 
 
-void watchdog_no_cloexec(void)
+void watchdog_set_cloexec(bool val)
 {
 	if (wdt_fd < 0)
 		return;
 
-	fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) & ~FD_CLOEXEC);
+	int flags = fcntl(wdt_fd, F_GETFD);
+	if (val)
+		flags |= FD_CLOEXEC;
+	else
+		flags &= ~FD_CLOEXEC;
+	fcntl(wdt_fd, F_SETFD,  flags);
 }

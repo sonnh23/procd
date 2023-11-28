@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 John Crispin <blogic@openwrt.org>
+ * Copyright (C) 2019 Paul Spooren <mail@aparcar.de>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License version 2.1
@@ -11,26 +11,17 @@
  * GNU General Public License for more details.
  */
 
-#ifndef _INIT_H__
-#define _INIT_H__
+#ifndef __CONTAINER_H
+#define __CONTAINER_H
 
-#include <errno.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <sys/stat.h>
 
-#include "../log.h"
-
-#ifndef EARLY_PATH
-#define EARLY_PATH "/usr/sbin:/sbin:/usr/bin:/bin"
-#endif
-
-void preinit(void);
-void early(void);
-int mkdev(const char *progname, int progmode);
-
-#ifdef ZRAM_TMPFS
-int mount_zram_on_tmp(void);
-#else
-static inline int mount_zram_on_tmp(void) {
-	return -ENOSYS;
+static inline bool is_container() {
+	struct stat s;
+	int r = stat("/.dockerenv", &s);
+	return !!getenv("container") || r == 0;
 }
-#endif
+
 #endif

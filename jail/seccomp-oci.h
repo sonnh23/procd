@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 John Crispin <blogic@openwrt.org>
+ * Copyright (C) 2020 Daniel Golle <daniel@makrotopia.org>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License version 2.1
@@ -10,27 +10,22 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
+#ifndef _JAIL_SECCOMP_OCI_H_
+#define _JAIL_SECCOMP_OCI_H_
 
-#ifndef _INIT_H__
-#define _INIT_H__
+#include <linux/filter.h>
 
-#include <errno.h>
+struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg);
+int applyOCIlinuxseccomp(struct sock_fprog *prog);
 
-#include "../log.h"
+#ifndef SECCOMP_SUPPORT
+struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg) {
+	return NULL;
+}
 
-#ifndef EARLY_PATH
-#define EARLY_PATH "/usr/sbin:/sbin:/usr/bin:/bin"
-#endif
-
-void preinit(void);
-void early(void);
-int mkdev(const char *progname, int progmode);
-
-#ifdef ZRAM_TMPFS
-int mount_zram_on_tmp(void);
-#else
-static inline int mount_zram_on_tmp(void) {
-	return -ENOSYS;
+int applyOCIlinuxseccomp(struct sock_fprog *prog) {
+	return ENOTSUP;
 }
 #endif
+
 #endif

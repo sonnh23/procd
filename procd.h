@@ -27,10 +27,10 @@
 #define __init __attribute__((constructor))
 
 extern char *ubus_socket;
-extern int upgrade_running;
 
 void procd_connect_ubus(void);
 void procd_reconnect_ubus(int reconnect);
+void ubus_init_hotplug(struct ubus_context *ctx);
 void ubus_init_service(struct ubus_context *ctx);
 void ubus_init_system(struct ubus_context *ctx);
 
@@ -39,7 +39,6 @@ void procd_state_ubus_connect(void);
 void procd_shutdown(int event);
 void procd_early(void);
 void procd_preinit(void);
-void procd_coldplug(void);
 void procd_signal(void);
 void procd_signal_preinit(void);
 void procd_inittab(void);
@@ -47,7 +46,6 @@ void procd_inittab_run(const char *action);
 void procd_bcast_event(char *event, struct blob_attr *msg);
 
 struct trigger;
-void trigger_init(void);
 void trigger_event(const char *type, struct blob_attr *data);
 void trigger_add(struct blob_attr *rule, void *id);
 void trigger_del(void *id);

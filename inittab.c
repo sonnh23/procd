@@ -12,6 +12,7 @@
  * GNU General Public License for more details.
  */
 
+#define _GNU_SOURCE
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
@@ -29,6 +30,10 @@
 #include "utils/utils.h"
 #include "procd.h"
 #include "rcS.h"
+
+#ifndef O_PATH
+#define O_PATH		010000000
+#endif
 
 #define TAG_ID		0
 #define TAG_RUNLVL	1
@@ -65,56 +70,41 @@ static char *ask = "/sbin/askfirst";
 
 static LIST_HEAD(actions);
 
-static int dev_open(const char *dev)
-{
-	int fd = -1;
-
-	if (dev) {
-		if (chdir("/dev"))
-			ERROR("failed to change dir to /dev\n");
-		fd = open(dev, O_RDWR);
-		if (chdir("/"))
-			ERROR("failed to change dir to /\n");
-	}
-
-	return fd;
-}
-
 static int dev_exist(const char *dev)
 {
-	int res;
+	int dfd, fd;
 
-	res = dev_open(dev);
-	if (res != -1)
-		close(res);
+	dfd = open("/dev", O_PATH|O_DIRECTORY);
 
-	return (res != -1);
+	if (dfd < 0)
+		return 0;
+
+	fd = openat(dfd, dev, O_RDONLY);
+	close(dfd);
+
+	if (fd < 0)
+		return 0;
+
+	close(fd);
+	return 1;
 }
 
 static void fork_worker(struct init_action *a)
 {
-	int fd;
 	pid_t p;
 
 	a->proc.pid = fork();
 	if (!a->proc.pid) {
 		p = setsid();
 
-		fd = dev_open(a->id);
-		if (fd != -1)
-		{
-			dup2(fd, STDIN_FILENO);
-			dup2(fd, STDOUT_FILENO);
-			dup2(fd, STDERR_FILENO);
-			if (fd > STDERR_FILENO)
-				close(fd);
-		}
+		if (patch_stdio(a->id))
+			ERROR("Failed to setup i/o redirection\n");
 
 		ioctl(STDIN_FILENO, TIOCSCTTY, 1);
 		tcsetpgrp(STDIN_FILENO, p);
 
 		execvp(a->argv[0], a->argv);
-		ERROR("Failed to execute %s\n", a->argv[0]);
+		ERROR("Failed to execute %s: %m\n", a->argv[0]);
 		exit(-1);
 	}
 
@@ -130,14 +120,22 @@ static void child_exit(struct uloop_process *proc, int ret)
 {
 	struct init_action *a = container_of(proc, struct init_action, proc);
 
-	DEBUG(4, "pid:%d\n", proc->pid);
-        uloop_timeout_set(&a->tout, a->respawn);
+	DEBUG(4, "pid:%d, exitcode:%d\n", proc->pid, ret);
+	proc->pid = 0;
+
+	if (!dev_exist(a->id)) {
+		DEBUG(4, "Skipping respawn: device '%s' does not exist anymore\n", a->id);
+		return;
+	}
+
+	uloop_timeout_set(&a->tout, a->respawn);
 }
 
 static void respawn(struct uloop_timeout *tout)
 {
 	struct init_action *a = container_of(tout, struct init_action, tout);
-	fork_worker(a);
+	if (!a->proc.pid)
+		fork_worker(a);
 }
 
 static void rcdone(struct runqueue *q)
@@ -167,13 +165,17 @@ static void askfirst(struct init_action *a)
 	}
 
 	a->tout.cb = respawn;
-	for (i = MAX_ARGS - 1; i >= 1; i--)
-		a->argv[i] = a->argv[i - 1];
-	a->argv[0] = ask;
+	/* shift arguments only if not yet done */
+	if (a->argv[0] != ask) {
+		for (i = MAX_ARGS - 1; i >= 1; i--)
+			a->argv[i] = a->argv[i - 1];
+		a->argv[0] = ask;
+	}
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;
-	fork_worker(a);
+	if (!a->proc.pid)
+		fork_worker(a);
 }
 
 static void askconsole(struct init_action *a)
@@ -181,7 +183,15 @@ static void askconsole(struct init_action *a)
 	char line[256], *tty, *split;
 	int i;
 
+	/* First, try console= on the kernel command line,
+	 * then fallback to /sys/class/tty/console/active,
+	 * which should work when linux,stdout-path (or equivalent)
+	 * is in the device tree
+	 */
 	tty = get_cmdline_val("console", line, sizeof(line));
+	if (tty == NULL) {
+		tty = get_active_console(line, sizeof(line));
+	}
 	if (tty != NULL) {
 		split = strchr(tty, ',');
 		if (split != NULL)
@@ -201,13 +211,17 @@ static void askconsole(struct init_action *a)
 	}
 
 	a->tout.cb = respawn;
-	for (i = MAX_ARGS - 1; i >= 1; i--)
-		a->argv[i] = a->argv[i - 1];
-	a->argv[0] = ask;
+	/* shift arguments only if not yet done */
+	if (a->argv[0] != ask) {
+		for (i = MAX_ARGS - 1; i >= 1; i--)
+			a->argv[i] = a->argv[i - 1];
+		a->argv[0] = ask;
+	}
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;
-	fork_worker(a);
+	if (!a->proc.pid)
+		fork_worker(a);
 }
 
 static void rcrespawn(struct init_action *a)
@@ -216,7 +230,8 @@ static void rcrespawn(struct init_action *a)
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;
-	fork_worker(a);
+	if (!a->proc.pid)
+		fork_worker(a);
 }
 
 static struct init_handler handlers[] = {
@@ -236,6 +251,14 @@ static struct init_handler handlers[] = {
 		.multi = 1,
 	}, {
 		.name = "respawn",
+		.cb = rcrespawn,
+		.multi = 1,
+	}, {
+		.name = "askconsolelate",
+		.cb = askconsole,
+		.multi = 1,
+	}, {
+		.name = "respawnlate",
 		.cb = rcrespawn,
 		.multi = 1,
 	}
@@ -261,12 +284,9 @@ void procd_inittab_run(const char *handler)
 
 	list_for_each_entry(a, &actions, list)
 		if (!strcmp(a->handler->name, handler)) {
-			if (a->handler->multi) {
-				a->handler->cb(a);
-				continue;
-			}
 			a->handler->cb(a);
-			break;
+			if (!a->handler->multi)
+				break;
 		}
 }
 
@@ -280,14 +300,13 @@ void procd_inittab(void)
 	char *line;
 
 	if (!fp) {
-		ERROR("Failed to open %s\n", tab);
+		ERROR("Failed to open %s: %m\n", tab);
 		return;
 	}
 
 	regcomp(&pat_inittab, "([a-zA-Z0-9]*):([a-zA-Z0-9]*):([a-zA-Z0-9]*):(.*)", REG_EXTENDED);
 	line = malloc(LINE_LEN);
-	a = malloc(sizeof(struct init_action));
-	memset(a, 0, sizeof(struct init_action));
+	a = calloc(1, sizeof(struct init_action));
 
 	while (fgets(line, LINE_LEN, fp)) {
 		char *tags[TAG_PROCESS + 1];
@@ -305,7 +324,7 @@ void procd_inittab(void)
 		if (regexec(&pat_inittab, line, 5, matches, 0))
 			continue;
 
-		DEBUG(4, "Parsing inittab - %s", line);
+		DEBUG(4, "Parsing inittab - %s\n", line);
 
 		for (i = TAG_ID; i <= TAG_PROCESS; i++) {
 			line[matches[i].rm_eo] = '\0';
@@ -324,8 +343,7 @@ void procd_inittab(void)
 		if (add_action(a, tags[TAG_ACTION]))
 			continue;
 		line = malloc(LINE_LEN);
-		a = malloc(sizeof(struct init_action));
-		memset(a, 0, sizeof(struct init_action));
+		a = calloc(1, sizeof(struct init_action));
 	}
 
 	fclose(fp);

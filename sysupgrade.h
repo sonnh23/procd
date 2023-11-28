@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 John Crispin <blogic@openwrt.org>
+ * Copyright (C) 2017 Matthias Schiffer <mschiffer@universe-factory.net>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License version 2.1
@@ -11,26 +11,14 @@
  * GNU General Public License for more details.
  */
 
-#ifndef _INIT_H__
-#define _INIT_H__
+#ifndef __PROCD_SYSUPGRADE_H
+#define __PROCD_SYSUPGRADE_H
 
-#include <errno.h>
+struct blob_attr;
 
-#include "../log.h"
+void sysupgrade_exec_upgraded(const char *prefix, char *path,
+			      const char *backup, char *command,
+			      struct blob_attr *options);
 
-#ifndef EARLY_PATH
-#define EARLY_PATH "/usr/sbin:/sbin:/usr/bin:/bin"
-#endif
 
-void preinit(void);
-void early(void);
-int mkdev(const char *progname, int progmode);
-
-#ifdef ZRAM_TMPFS
-int mount_zram_on_tmp(void);
-#else
-static inline int mount_zram_on_tmp(void) {
-	return -ENOSYS;
-}
-#endif
 #endif

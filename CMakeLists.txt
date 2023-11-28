@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 2.6)
 
 PROJECT(procd C)
+INCLUDE(GNUInstallDirs)
 ADD_DEFINITIONS(-Os -ggdb -Wall -Werror --std=gnu99 -Wmissing-declarations)
 
 SET(CMAKE_SHARED_LIBRARY_LINK_C_FLAGS "")
@@ -13,18 +14,31 @@ ENDIF()
 
 ADD_LIBRARY(setlbf SHARED service/setlbf.c)
 INSTALL(TARGETS setlbf
-	LIBRARY DESTINATION lib
+	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
 
-SET(SOURCES procd.c signal.c watchdog.c state.c	inittab.c rcS.c	ubus.c system.c
-	service/service.c service/instance.c service/validate.c service/trigger.c service/watch.c
-	plug/coldplug.c plug/hotplug.c utils/utils.c)
+SET(SOURCES procd.c signal.c state.c hotplug-dispatch.c inittab.c rcS.c ubus.c
+	system.c sysupgrade.c service/service.c service/instance.c
+	service/validate.c service/trigger.c service/watch.c utils/utils.c)
+IF(NOT DISABLE_INIT)
+  SET(SOURCES ${SOURCES} watchdog.c plug/coldplug.c plug/hotplug.c)
+ENDIF()
 
-SET(LIBS ubox ubus json-c blobmsg_json json_script)
+FIND_LIBRARY(ubox NAMES ubox)
+FIND_LIBRARY(ubus NAMES ubus)
+FIND_LIBRARY(blobmsg_json NAMES blobmsg_json)
+FIND_LIBRARY(json_script NAMES json_script)
+FIND_LIBRARY(json NAMES json-c json)
+
+SET(LIBS ${ubox} ${ubus} ${json} ${blobmsg_json} ${json_script})
 
 IF(DEBUG)
-  ADD_DEFINITIONS(-DDEBUG -g3)
+  ADD_DEFINITIONS(-DUDEV_DEBUG -g3)
+ENDIF()
+
+IF(EARLY_PATH)
+  ADD_DEFINITIONS(-DEARLY_PATH="${EARLY_PATH}")
 ENDIF()
 
 IF(ZRAM_TMPFS)
@@ -32,34 +46,44 @@ IF(ZRAM_TMPFS)
   SET(SOURCES_ZRAM initd/zram.c)
 ENDIF()
 
-IF(BUILD_UPGRADED)
-  add_subdirectory(upgraded)
+IF(SELINUX)
+  include(FindPkgConfig)
+  pkg_search_module(SELINUX REQUIRED libselinux)
+  add_compile_definitions(WITH_SELINUX)
 ENDIF()
+
+add_subdirectory(upgraded)
 
 ADD_EXECUTABLE(procd ${SOURCES})
 TARGET_LINK_LIBRARIES(procd ${LIBS})
 INSTALL(TARGETS procd
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
+FIND_PATH(ubox_include_dir libubox/uloop.h)
+INCLUDE_DIRECTORIES(${ubox_include_dir})
 
-ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c watchdog.c
+IF(DISABLE_INIT)
+ADD_DEFINITIONS(-DDISABLE_INIT)
+ELSE()
+ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c sysupgrade.c watchdog.c
 	utils/utils.c ${SOURCES_ZRAM})
-TARGET_LINK_LIBRARIES(init ${LIBS})
+TARGET_INCLUDE_DIRECTORIES(init PUBLIC ${SELINUX_INCLUDE_DIRS})
+TARGET_LINK_LIBRARIES(init ${LIBS} ${SELINUX_LIBRARIES})
 INSTALL(TARGETS init
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
-
 
 ADD_EXECUTABLE(udevtrigger plug/udevtrigger.c)
 INSTALL(TARGETS udevtrigger
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
+ENDIF()
 
 
 ADD_EXECUTABLE(askfirst utils/askfirst.c)
 INSTALL(TARGETS askfirst
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 ADD_CUSTOM_COMMAND(
@@ -77,34 +101,51 @@ ADD_CUSTOM_COMMAND(
 ADD_CUSTOM_TARGET(capabilities-names-h DEPENDS capabilities-names.h)
 
 IF(SECCOMP_SUPPORT)
-ADD_LIBRARY(preload-seccomp SHARED jail/preload.c jail/seccomp.c)
-TARGET_LINK_LIBRARIES(preload-seccomp dl ubox blobmsg_json)
+ADD_DEFINITIONS(-DSECCOMP_SUPPORT)
+ADD_LIBRARY(preload-seccomp SHARED jail/preload.c jail/seccomp.c jail/seccomp-oci.c)
+TARGET_LINK_LIBRARIES(preload-seccomp dl ${ubox} ${blobmsg_json})
 INSTALL(TARGETS preload-seccomp
-	LIBRARY DESTINATION lib
+	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 ADD_DEPENDENCIES(preload-seccomp syscall-names-h)
-endif()
+SET(SOURCES_OCI_SECCOMP jail/seccomp-oci.c)
+ENDIF()
 
 IF(JAIL_SUPPORT)
-ADD_EXECUTABLE(ujail jail/jail.c jail/elf.c jail/capabilities.c)
-TARGET_LINK_LIBRARIES(ujail ubox blobmsg_json)
+ADD_EXECUTABLE(ujail jail/jail.c jail/cgroups.c jail/elf.c jail/fs.c jail/capabilities.c ${SOURCES_OCI_SECCOMP})
+TARGET_LINK_LIBRARIES(ujail ${ubox} ${ubus} ${blobmsg_json})
 INSTALL(TARGETS ujail
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 ADD_DEPENDENCIES(ujail capabilities-names-h)
+IF(SECCOMP_SUPPORT)
+  ADD_DEPENDENCIES(ujail syscall-names-h)
+ENDIF()
+
+ADD_EXECUTABLE(ujail-console jail/console.c)
+TARGET_LINK_LIBRARIES(ujail-console ${ubox} ${ubus} ${blobmsg_json})
+INSTALL(TARGETS ujail-console
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
+
+ADD_EXECUTABLE(uxc uxc.c)
+TARGET_LINK_LIBRARIES(uxc ${ubox} ${ubus} ${blobmsg_json})
+INSTALL(TARGETS uxc
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
 endif()
 
 IF(UTRACE_SUPPORT)
 ADD_EXECUTABLE(utrace trace/trace.c)
-TARGET_LINK_LIBRARIES(utrace ubox ${json} blobmsg_json)
+TARGET_LINK_LIBRARIES(utrace ${ubox} ${json} ${blobmsg_json})
 INSTALL(TARGETS utrace
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 ADD_DEPENDENCIES(utrace syscall-names-h)
 
 ADD_LIBRARY(preload-trace SHARED trace/preload.c)
 TARGET_LINK_LIBRARIES(preload-trace dl)
 INSTALL(TARGETS preload-trace
-	LIBRARY DESTINATION lib
+	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 endif()

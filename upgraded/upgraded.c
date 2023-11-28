@@ -12,8 +12,11 @@
  * GNU General Public License for more details.
  */
 
+#define _GNU_SOURCE
+
 #include <sys/reboot.h>
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +26,10 @@
 #include <libubox/uloop.h>
 
 #include "../watchdog.h"
+
+#ifndef O_PATH
+#define O_PATH		010000000
+#endif
 
 static struct uloop_process upgrade_proc;
 unsigned int debug = 2;
@@ -34,22 +41,26 @@ static void upgrade_proc_cb(struct uloop_process *proc, int ret)
 	uloop_end();
 }
 
-static void sysupgarde(char *folder)
+static void sysupgrade(char *path, char *command)
 {
-	char *args[] = { "/sbin/sysupgrade", "nand", NULL, NULL };
+	char *args[] = { "/lib/upgrade/stage2", path, command, NULL };
 
-	args[2] = folder;
 	upgrade_proc.cb = upgrade_proc_cb;
 	upgrade_proc.pid = fork();
-	if (!upgrade_proc.pid) {
-		execvp(args[0], args);
+	if (upgrade_proc.pid < 0) {
 		fprintf(stderr, "Failed to fork sysupgrade\n");
-		exit(-1);
+		return;
 	}
-	if (upgrade_proc.pid <= 0) {
-		fprintf(stderr, "Failed to start sysupgarde\n");
-		uloop_end();
+
+	if (!upgrade_proc.pid) {
+		/* Child */
+		execvp(args[0], args);
+		fprintf(stderr, "Failed to exec sysupgrade\n");
+		_exit(EXIT_FAILURE);
 	}
+
+	uloop_process_add(&upgrade_proc);
+	uloop_run();
 }
 
 int main(int argc, char **argv)
@@ -58,21 +69,34 @@ int main(int argc, char **argv)
 
 	if (p != 1) {
 		fprintf(stderr, "this tool needs to run as pid 1\n");
-		return -1;
+		return 1;
 	}
-	if (chdir("/tmp") == -1) {
-		fprintf(stderr, "failed to chdir to /tmp: %s\n", strerror(errno));
-		return -1;
+
+	int fd = open("/", O_DIRECTORY|O_PATH);
+	if (fd < 0) {
+		fprintf(stderr, "unable to open prefix directory: %m\n");
+		return 1;
 	}
-	if (argc != 2) {
-		fprintf(stderr, "sysupgrade stage 2 failed, no folder specified\n");
-		return -1;
+
+	if (chroot(".") < 0) {
+		fprintf(stderr, "failed to chroot: %m\n");
+		return 1;
+	}
+
+	if (fchdir(fd) == -1) {
+		fprintf(stderr, "failed to chdir to prefix directory: %m\n");
+		return 1;
+	}
+	close(fd);
+
+	if (argc != 3) {
+		fprintf(stderr, "sysupgrade stage 2 failed, invalid command line\n");
+		return 1;
 	}
 
 	uloop_init();
 	watchdog_init(0);
-	sysupgarde(argv[1]);
-	uloop_run();
+	sysupgrade(argv[1], argv[2]);
 
 	reboot(RB_AUTOBOOT);
 

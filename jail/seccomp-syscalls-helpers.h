@@ -10,22 +10,28 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef _JAIL_LOG_H_
-#define _JAIL_LOG_H_
+#ifndef _JAIL_SECCOMP_HELPERS_H_
+#define _JAIL_SECCOMP_HELPERS_H_
 
-extern int debug;
-#include <stdio.h>
-#include <syslog.h>
+static int find_syscall(const char *name)
+{
+	int i;
 
-#define INFO(fmt, ...) do { \
-	printf("jail: "fmt, ## __VA_ARGS__); \
-	} while (0)
-#define ERROR(fmt, ...) do { \
-	syslog(LOG_ERR, "jail: "fmt, ## __VA_ARGS__); \
-	fprintf(stderr,"jail: "fmt, ## __VA_ARGS__); \
-	} while (0)
-#define DEBUG(fmt, ...) do { \
-	if (debug) printf("jail: "fmt, ## __VA_ARGS__); \
-	} while (0)
+	for (i = 0; i < SYSCALL_COUNT; i++) {
+		int sc = syscall_index_to_number(i);
+		if (syscall_name(sc) && !strcmp(syscall_name(sc), name))
+			return sc;
+	}
+
+	return -1;
+}
+
+static void set_filter(struct sock_filter *filter, __u16 code, __u8 jt, __u8 jf, __u32 k)
+{
+	filter->code = code;
+	filter->jt = jt;
+	filter->jf = jf;
+	filter->k = k;
+}
 
 #endif

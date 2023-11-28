@@ -16,6 +16,7 @@
 
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/sysmacros.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -121,5 +122,6 @@ int mkdev(const char *name, int _mode)
 	n_patterns = 1;
 	find_devs(true);
 	find_devs(false);
+	free(pattern);
 	return chdir("/");
 }

@@ -16,12 +16,14 @@
 #include <sys/types.h>
 #include <sys/mount.h>
 
+#include <stdlib.h>
 #include <unistd.h>
 
 #include "../procd.h"
 #include "../libc-compat.h"
 
 #include "hotplug.h"
+#include "../container.h"
 
 static struct uloop_process udevtrigger;
 
@@ -43,23 +45,26 @@ void procd_coldplug(void)
 	char *argv[] = { "udevtrigger", NULL };
 	unsigned int oldumask = umask(0);
 
-	umount2("/dev/pts", MNT_DETACH);
-	umount2("/dev/", MNT_DETACH);
-	mount("tmpfs", "/dev", "tmpfs", MS_NOSUID, "mode=0755,size=512K");
+	if (!is_container()) {
+		umount2("/dev/pts", MNT_DETACH);
+		umount2("/dev/", MNT_DETACH);
+		mount("tmpfs", "/dev", "tmpfs", MS_NOSUID, "mode=0755,size=512K");
+		mkdir("/dev/pts", 0755);
+		mount("devpts", "/dev/pts", "devpts", MS_NOEXEC | MS_NOSUID, 0);
+	}
+
 	ignore(symlink("/tmp/shm", "/dev/shm"));
-	mkdir("/dev/pts", 0755);
 	umask(oldumask);
-	mount("devpts", "/dev/pts", "devpts", MS_NOEXEC | MS_NOSUID, 0);
 	udevtrigger.cb = udevtrigger_complete;
 	udevtrigger.pid = fork();
 	if (!udevtrigger.pid) {
 		execvp(argv[0], argv);
-		ERROR("Failed to start coldplug\n");
-		exit(-1);
+		ERROR("Failed to start coldplug: %m\n");
+		exit(EXIT_FAILURE);
 	}
 
 	if (udevtrigger.pid <= 0) {
-		ERROR("Failed to start new coldplug instance\n");
+		ERROR("Failed to start new coldplug instance: %m\n");
 		return;
 	}
 

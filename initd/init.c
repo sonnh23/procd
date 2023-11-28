@@ -29,6 +29,10 @@
 #include <unistd.h>
 #include <stdio.h>
 
+#if defined(WITH_SELINUX)
+#include <selinux/selinux.h>
+#endif
+
 #include "../utils/utils.h"
 #include "init.h"
 #include "../watchdog.h"
@@ -67,6 +71,38 @@ cmdline(void)
 	}
 }
 
+#if defined(WITH_SELINUX)
+static int
+selinux(char **argv)
+{
+	int enforce = 0;
+	int ret;
+
+	/* SELinux already initialized */
+	if (getenv("SELINUX_INIT"))
+		return 0;
+
+	putenv("SELINUX_INIT=1");
+
+	ret = selinux_init_load_policy(&enforce);
+	if (ret == 0)
+		execv(argv[0], argv);
+
+	if (enforce > 0) {
+		fprintf(stderr, "Cannot load SELinux policy, but system in enforcing mode. Halting.\n");
+		return 1;
+	}
+
+	return 0;
+}
+#else
+static int
+selinux(char **argv)
+{
+	return 0;
+}
+#endif
+
 int
 main(int argc, char **argv)
 {
@@ -77,7 +113,10 @@ main(int argc, char **argv)
 	sigaction(SIGTERM, &sa_shutdown, NULL);
 	sigaction(SIGUSR1, &sa_shutdown, NULL);
 	sigaction(SIGUSR2, &sa_shutdown, NULL);
+	sigaction(SIGPWR, &sa_shutdown, NULL);
 
+	if (selinux(argv))
+		exit(-1);
 	early();
 	cmdline();
 	watchdog_init(1);
@@ -86,30 +125,23 @@ main(int argc, char **argv)
 	if (!pid) {
 		char *kmod[] = { "/sbin/kmodloader", "/etc/modules-boot.d/", NULL };
 
-		if (debug < 3) {
-			int fd = open("/dev/null", O_RDWR);
+		if (debug < 3)
+			patch_stdio("/dev/null");
 
-			if (fd > -1) {
-				dup2(fd, STDIN_FILENO);
-				dup2(fd, STDOUT_FILENO);
-				dup2(fd, STDERR_FILENO);
-				if (fd > STDERR_FILENO)
-					close(fd);
-			}
-		}
 		execvp(kmod[0], kmod);
-		ERROR("Failed to start kmodloader\n");
-		exit(-1);
+		ERROR("Failed to start kmodloader: %m\n");
+		exit(EXIT_FAILURE);
 	}
 	if (pid <= 0) {
-		ERROR("Failed to start kmodloader instance\n");
+		ERROR("Failed to start kmodloader instance: %m\n");
 	} else {
+		const struct timespec req = {0, 10 * 1000 * 1000};
 		int i;
 
-		for (i = 0; i < 120; i++) {
+		for (i = 0; i < 1200; i++) {
 			if (waitpid(pid, NULL, WNOHANG) > 0)
 				break;
-			sleep(1);
+			nanosleep(&req, NULL);
 			watchdog_ping();
 		}
 	}

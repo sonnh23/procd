@@ -15,14 +15,17 @@
 #include <sys/mount.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
 
+#include "../utils/utils.h"
 #include "init.h"
 #include "../libc-compat.h"
+#include "../container.h"
 
 static void
 early_dev(void)
@@ -35,25 +38,16 @@ static void
 early_console(const char *dev)
 {
 	struct stat s;
-	int dd;
 
 	if (stat(dev, &s)) {
-		ERROR("Failed to stat %s\n", dev);
+		ERROR("Failed to stat %s: %m\n", dev);
 		return;
 	}
 
-	dd = open(dev, O_RDWR);
-	if (dd < 0)
-		dd = open("/dev/null", O_RDWR);
-
-	dup2(dd, STDIN_FILENO);
-	dup2(dd, STDOUT_FILENO);
-	dup2(dd, STDERR_FILENO);
-
-	if (dd != STDIN_FILENO &&
-	    dd != STDOUT_FILENO &&
-	    dd != STDERR_FILENO)
-		close(dd);
+	if (patch_stdio(dev)) {
+		ERROR("Failed to setup i/o redirection\n");
+		return;
+	}
 
 	fcntl(STDERR_FILENO, F_SETFL, fcntl(STDERR_FILENO, F_GETFL) | O_NONBLOCK);
 }
@@ -63,34 +57,37 @@ early_mounts(void)
 {
 	unsigned int oldumask = umask(0);
 
-	mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
-	mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
-	mount("cgroup", "/sys/fs/cgroup", "cgroup",  MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
-	mount("tmpfs", "/dev", "tmpfs", MS_NOATIME | MS_NOSUID, "mode=0755,size=512K");
-	ignore(symlink("/tmp/shm", "/dev/shm"));
-	mkdir("/dev/pts", 0755);
-	mount("devpts", "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "mode=600");
-	early_dev();
+	if (!is_container()) {
+		mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
+		mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
+		mount("cgroup2", "/sys/fs/cgroup", "cgroup2",  MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RELATIME, "nsdelegate");
+		mount("tmpfs", "/dev", "tmpfs", MS_NOATIME | MS_NOSUID, "mode=0755,size=512K");
+		ignore(symlink("/tmp/shm", "/dev/shm"));
+		mkdir("/dev/pts", 0755);
+		mount("devpts", "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "mode=600");
+
+		early_dev();
+	}
 
 	early_console("/dev/console");
 	if (mount_zram_on_tmp()) {
-		mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, 0);
+		mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, "mode=01777");
 		mkdir("/tmp/shm", 01777);
 	} else {
 		mkdir("/tmp/shm", 01777);
 		mount("tmpfs", "/tmp/shm", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME,
 				"mode=01777");
 	}
-	mkdir("/tmp/run", 0777);
-	mkdir("/tmp/lock", 0777);
-	mkdir("/tmp/state", 0777);
+	mkdir("/tmp/run", 0755);
+	mkdir("/tmp/lock", 0755);
+	mkdir("/tmp/state", 0755);
 	umask(oldumask);
 }
 
 static void
 early_env(void)
 {
-	setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin", 1);
+	setenv("PATH", EARLY_PATH, 1);
 }
 
 void
